@@ -4,6 +4,7 @@ const STORAGE_KEYS = {
   settings: "mealPlanner_settings",
   plan: "mealPlanner_plan",
   checkedItems: "mealPlanner_checkedItems",
+  recipes: "mealPlanner_recipes",
 };
 
 const DAYS = ["月", "火", "水", "木", "金", "土", "日"];
@@ -95,6 +96,9 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [tabTransition, setTabTransition] = useState(false);
   const [avoidInput, setAvoidInput] = useState("");
+  const [recipes, setRecipes] = useState(() => loadFromStorage(STORAGE_KEYS.recipes, {}));
+  const [loadingRecipe, setLoadingRecipe] = useState(null);
+  const [openRecipe, setOpenRecipe] = useState(null);
   const prevTabRef = useRef(tab);
 
   // --- Persist to localStorage ---
@@ -109,6 +113,10 @@ export default function App() {
   useEffect(() => {
     saveToStorage(STORAGE_KEYS.checkedItems, checkedItems);
   }, [checkedItems]);
+
+  useEffect(() => {
+    saveToStorage(STORAGE_KEYS.recipes, recipes);
+  }, [recipes]);
 
 
   // --- Tab transition ---
@@ -354,6 +362,47 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
     throw lastError || new Error("すべてのモデルで生成に失敗しました");
   }, []);
 
+  // --- API call (text response, no JSON parse) ---
+  const callAIText = useCallback(async (prompt) => {
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    if (!apiKey) throw new Error("APIキーが設定されていません");
+
+    const models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash-lite"];
+    let lastError = null;
+
+    for (const model of models) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 2000));
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.7, maxOutputTokens: 4000 },
+              }),
+            }
+          );
+          if (response.status === 503) { lastError = new Error("サーバー混雑"); continue; }
+          if (response.status === 404) { lastError = new Error(`モデル ${model} 利用不可`); break; }
+          if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData?.error?.message || `API error: ${response.status}`);
+          }
+          const data = await response.json();
+          return data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        } catch (e) {
+          lastError = e;
+          if (e.message.includes("混雑")) continue;
+          if (!e.message.includes("利用不可")) throw e;
+        }
+      }
+    }
+    throw lastError || new Error("レシピの取得に失敗しました");
+  }, []);
+
   // --- Generate full plan ---
   const generatePlan = useCallback(async () => {
     setError(null);
@@ -445,6 +494,50 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
   const totalFamily = (settings.adults || 2) + (settings.children ?? 1);
   const familySizeLabel = `大人${settings.adults || 2}人・子ども${settings.children ?? 1}人（計${totalFamily}人）`;
   const familySizeShort = `${totalFamily}人`;
+
+  // --- Generate recipe for a dish ---
+  const generateRecipe = useCallback(async (dishName) => {
+    if (recipes[dishName]) {
+      setOpenRecipe(dishName);
+      return;
+    }
+    setLoadingRecipe(dishName);
+    try {
+      const childAgeGroups = (settings.childAgeGroups || ["1-2"]).slice(0, settings.children ?? 1);
+      const childAgeStr = childAgeGroups.map((id) => AGE_GROUPS.find((a) => a.id === id)?.label || id).join("・");
+
+      const prompt = `「${dishName}」の家庭向けレシピを教えてください。
+
+条件:
+- 家族構成: ${familySizeLabel}（子ども: ${childAgeStr}）
+- 作り置き・冷凍保存を前提
+- 子どもと大人の取り分けができること
+${(settings.avoidFoods || []).length > 0 ? `- 避ける食材: ${settings.avoidFoods.join("、")}` : ""}
+
+以下の形式で簡潔に回答してください:
+
+【材料】（${familySizeShort}分）
+・食材名 分量
+
+【作り方】
+1. 手順
+2. 手順
+
+【子どもアレンジ】
+・ポイント
+
+【保存方法】
+・冷凍/冷蔵の目安`;
+
+      const text = await callAIText(prompt);
+      setRecipes((prev) => ({ ...prev, [dishName]: text }));
+      setOpenRecipe(dishName);
+    } catch (e) {
+      setError(`レシピの取得に失敗しました: ${e.message}`);
+    } finally {
+      setLoadingRecipe(null);
+    }
+  }, [recipes, settings, familySizeLabel, familySizeShort, callAIText]);
 
   // --- Settings summary ---
   const settingsSummary = () => {
@@ -1237,6 +1330,141 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
     );
   };
 
+  // --- Render: Recipe Tab ---
+  const renderRecipe = () => {
+    // Collect unique dish names from the plan
+    const dishes = [];
+    const seen = new Set();
+    if (plan?.days) {
+      plan.days.forEach((day) => {
+        if (!day.meals) return;
+        Object.values(day.meals).forEach((meal) => {
+          ["staple", "main", "side"].forEach((role) => {
+            const dish = meal?.[role];
+            if (dish?.name && !seen.has(dish.name)) {
+              seen.add(dish.name);
+              dishes.push({ name: dish.name, role, desc: dish.desc });
+            }
+          });
+        });
+      });
+    }
+
+    if (dishes.length === 0) {
+      return (
+        <div style={styles.tabContent}>
+          <div style={styles.emptyState}>
+            <div style={styles.emptyEmoji}>📖</div>
+            <div style={styles.emptyText}>レシピがまだありません</div>
+            <button style={styles.backLink} onClick={() => switchTab("settings")}>献立を生成するとレシピが見られます</button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div style={styles.tabContent}>
+        <div style={styles.card}>
+          <div style={styles.sectionTitle}><span>📖</span> レシピ一覧</div>
+          <p style={{ fontSize: 12, color: "#999", margin: "0 0 12px" }}>
+            料理名をタップするとレシピを表示します
+          </p>
+
+          {dishes.map((dish) => {
+            const rc = DISH_ROLES[dish.role];
+            const isOpen = openRecipe === dish.name;
+            const isLoading = loadingRecipe === dish.name;
+            const hasRecipe = !!recipes[dish.name];
+
+            return (
+              <div key={dish.name} style={{ marginBottom: 8 }}>
+                <button
+                  onClick={() => isOpen ? setOpenRecipe(null) : generateRecipe(dish.name)}
+                  disabled={isLoading}
+                  style={{
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "12px 14px",
+                    border: isOpen ? "2px solid #6c5ce7" : "1px solid #eee",
+                    borderRadius: 12,
+                    background: isOpen ? "#faf8ff" : "#fff",
+                    cursor: isLoading ? "wait" : "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    transition: "all 0.2s",
+                  }}
+                >
+                  <span style={{
+                    fontSize: 10, padding: "2px 8px", borderRadius: 20, flexShrink: 0,
+                    background: rc.bg, color: rc.color, fontWeight: 600,
+                  }}>{rc.label}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "#2d2d44" }}>{dish.name}</div>
+                    {dish.desc && <div style={{ fontSize: 11, color: "#999", marginTop: 1 }}>{dish.desc}</div>}
+                  </div>
+                  {isLoading ? (
+                    <div style={{ ...styles.spinner, width: 16, height: 16, borderWidth: 2, flexShrink: 0 }} />
+                  ) : (
+                    <span style={{ fontSize: 12, color: hasRecipe ? "#6c5ce7" : "#ccc", flexShrink: 0 }}>
+                      {isOpen ? "▲" : hasRecipe ? "✓ ▼" : "▼"}
+                    </span>
+                  )}
+                </button>
+
+                {isOpen && recipes[dish.name] && (
+                  <div style={{
+                    padding: "14px 16px",
+                    margin: "0 4px",
+                    background: "#faf9ff",
+                    borderRadius: "0 0 12px 12px",
+                    borderLeft: "3px solid #6c5ce7",
+                    fontSize: 13,
+                    lineHeight: 1.8,
+                    color: "#333",
+                    whiteSpace: "pre-wrap",
+                  }}>
+                    {recipes[dish.name]}
+                    <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${dish.name}\n\n${recipes[dish.name]}`).then(() => {
+                            setCopied(true);
+                            setTimeout(() => setCopied(false), 2000);
+                          });
+                        }}
+                        style={styles.copyButton(copied)}
+                      >
+                        {copied ? "✓ コピー完了" : "📋 コピー"}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setRecipes((prev) => {
+                            const next = { ...prev };
+                            delete next[dish.name];
+                            return next;
+                          });
+                          setOpenRecipe(null);
+                          setTimeout(() => generateRecipe(dish.name), 100);
+                        }}
+                        style={{
+                          padding: "6px 14px", borderRadius: 8, border: "1px solid #eee",
+                          background: "#fff", fontSize: 12, cursor: "pointer", color: "#666",
+                        }}
+                      >
+                        🔄 再生成
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   // --- Main Render ---
   return (
     <div style={styles.container}>
@@ -1256,6 +1484,7 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
           { key: "settings", label: "⚙️ 設定" },
           { key: "plan", label: plan?.days ? "📅 献立 ✓" : "📅 献立" },
           { key: "grocery", label: Object.keys(groceryData).some((k) => (groceryData[k] || []).length > 0) ? "🛒 買い物 ✓" : "🛒 買い物" },
+          { key: "recipe", label: Object.keys(recipes).length > 0 ? `📖 レシピ (${Object.keys(recipes).length})` : "📖 レシピ" },
         ].map((t) => (
           <button
             key={t.key}
@@ -1274,6 +1503,7 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
       {tab === "settings" && renderSettings()}
       {tab === "plan" && renderPlan()}
       {tab === "grocery" && renderGrocery()}
+      {tab === "recipe" && renderRecipe()}
     </div>
   );
 }
