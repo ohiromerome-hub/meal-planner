@@ -296,39 +296,62 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
     [settings]
   );
 
-  // --- API call (Gemini direct) ---
+  // --- API call (Gemini direct with retry) ---
   const callAI = useCallback(async (prompt) => {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
     if (!apiKey) throw new Error("APIキーが設定されていません");
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 8000,
-          },
-        }),
+    const models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash-lite"];
+    let lastError = null;
+
+    for (const model of models) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 2000));
+
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: {
+                  temperature: 0.7,
+                  maxOutputTokens: 8000,
+                },
+              }),
+            }
+          );
+
+          if (response.status === 503) {
+            lastError = new Error("サーバーが混雑しています。リトライ中...");
+            continue;
+          }
+          if (response.status === 404) {
+            lastError = new Error(`モデル ${model} は利用できません`);
+            break; // skip to next model
+          }
+          if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            throw new Error(errData?.error?.message || `API error: ${response.status}`);
+          }
+
+          const data = await response.json();
+          const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+          const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/);
+          if (!jsonMatch) throw new Error("JSONの解析に失敗しました。再生成してください。");
+
+          return JSON.parse(jsonMatch[1]);
+        } catch (e) {
+          lastError = e;
+          if (e.message.includes("リトライ中")) continue;
+          if (!e.message.includes("利用できません")) throw e;
+        }
       }
-    );
-
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(errData?.error?.message || `API error: ${response.status}`);
     }
-
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-    // Extract JSON from response
-    const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/);
-    if (!jsonMatch) throw new Error("JSONの解析に失敗しました。再生成してください。");
-
-    return JSON.parse(jsonMatch[1]);
+    throw lastError || new Error("すべてのモデルで生成に失敗しました");
   }, []);
 
   // --- Generate full plan ---
