@@ -1181,19 +1181,6 @@ ${(settings.avoidFoods || []).length > 0 ? `- 避ける食材: ${settings.avoidF
           </div>
         )}
 
-        {/* Prep Timeline */}
-        {plan.prepTimeline?.length > 0 && (
-          <div style={styles.timelineCard}>
-            <div style={styles.sectionTitle}><span>⏰</span> まとめ調理タイムライン</div>
-            {plan.prepTimeline.map((item, idx) => (
-              <div key={idx} style={{ ...styles.timelineItem, borderBottom: idx === plan.prepTimeline.length - 1 ? "none" : styles.timelineItem.borderBottom }}>
-                <div style={styles.timelineBadge}>{item.timing}</div>
-                <div style={styles.timelineTasks}>{item.tasks.map((t, i) => <div key={i}>・{t}</div>)}</div>
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* Day cards */}
         <div style={styles.weekGrid} className="week-grid">
           {plan.days.map((day, idx) => {
@@ -1364,6 +1351,19 @@ ${(settings.avoidFoods || []).length > 0 ? `- 避ける食材: ${settings.avoidF
 
     return (
       <div style={styles.tabContent}>
+        {/* Prep Timeline */}
+        {plan?.prepTimeline?.length > 0 && (
+          <div style={styles.timelineCard}>
+            <div style={styles.sectionTitle}><span>⏰</span> まとめ調理タイムライン</div>
+            {plan.prepTimeline.map((item, idx) => (
+              <div key={idx} style={{ ...styles.timelineItem, borderBottom: idx === plan.prepTimeline.length - 1 ? "none" : styles.timelineItem.borderBottom }}>
+                <div style={styles.timelineBadge}>{item.timing}</div>
+                <div style={styles.timelineTasks}>{item.tasks.map((t, i) => <div key={i}>・{t}</div>)}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div style={styles.card}>
           <div style={styles.sectionTitle}><span>📖</span> レシピ一覧</div>
           <p style={{ fontSize: 12, color: "#999", margin: "0 0 12px" }}>
