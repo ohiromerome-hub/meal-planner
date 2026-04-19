@@ -4,7 +4,6 @@ const STORAGE_KEYS = {
   settings: "mealPlanner_settings",
   plan: "mealPlanner_plan",
   checkedItems: "mealPlanner_checkedItems",
-  apiKey: "mealPlanner_apiKey",
 };
 
 const DAYS = ["月", "火", "水", "木", "金", "土", "日"];
@@ -96,8 +95,6 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [tabTransition, setTabTransition] = useState(false);
   const [avoidInput, setAvoidInput] = useState("");
-  const [apiKey, setApiKey] = useState(() => loadFromStorage(STORAGE_KEYS.apiKey, ""));
-  const [showApiKey, setShowApiKey] = useState(false);
   const prevTabRef = useRef(tab);
 
   // --- Persist to localStorage ---
@@ -113,9 +110,6 @@ export default function App() {
     saveToStorage(STORAGE_KEYS.checkedItems, checkedItems);
   }, [checkedItems]);
 
-  useEffect(() => {
-    saveToStorage(STORAGE_KEYS.apiKey, apiKey);
-  }, [apiKey]);
 
   // --- Tab transition ---
   const switchTab = useCallback((newTab) => {
@@ -302,25 +296,25 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
     [settings]
   );
 
-  // --- API call ---
-  const callClaude = useCallback(async (prompt) => {
-    if (!apiKey) {
-      throw new Error("APIキーが設定されていません。設定タブでAPIキーを入力してください。");
-    }
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 8000,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
+  // --- API call (Gemini direct) ---
+  const callAI = useCallback(async (prompt) => {
+    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+    if (!apiKey) throw new Error("APIキーが設定されていません");
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 8000,
+          },
+        }),
+      }
+    );
 
     if (!response.ok) {
       const errData = await response.json().catch(() => ({}));
@@ -328,14 +322,14 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
     }
 
     const data = await response.json();
-    const text = (data.content || []).map((c) => c.text || "").join("");
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
     // Extract JSON from response
     const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/(\{[\s\S]*\})/);
-    if (!jsonMatch) throw new Error("JSONの解析に失敗しました");
+    if (!jsonMatch) throw new Error("JSONの解析に失敗しました。再生成してください。");
 
     return JSON.parse(jsonMatch[1]);
-  }, [apiKey]);
+  }, []);
 
   // --- Generate full plan ---
   const generatePlan = useCallback(async () => {
@@ -345,7 +339,7 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
 
     try {
       const prompt = buildPrompt();
-      const result = await callClaude(prompt);
+      const result = await callAI(prompt);
       if (!result?.days) throw new Error("献立の解析に失敗しました。再生成してください。");
       setPlan(result);
       setCheckedItems({});
@@ -356,7 +350,7 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
     } finally {
       setLoading(false);
     }
-  }, [settings, buildPrompt, callClaude, switchTab]);
+  }, [settings, buildPrompt, callAI, switchTab]);
 
   // --- Regenerate single day ---
   const regenerateDay = useCallback(
@@ -367,7 +361,7 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
 
       try {
         const prompt = buildPrompt(dayName, plan);
-        const result = await callClaude(prompt);
+        const result = await callAI(prompt);
 
         setPlan((prev) => {
           const newDays = prev.days.map((d) =>
@@ -383,7 +377,7 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
         setRegeneratingDay(null);
       }
     },
-    [plan, buildPrompt, callClaude]
+    [plan, buildPrompt, callAI]
   );
 
   // --- Grocery list helpers ---
@@ -1003,36 +997,9 @@ prepTimelineは週末の作り置き・平日の効率的な調理手順。`;
         </div>
       </div>
 
-      {/* API Key */}
-      <div style={styles.card} className="settings-card">
-        <div style={styles.sectionTitle}><span>🔑</span> APIキー</div>
-        <div style={{ fontSize: 12, color: "#999", marginBottom: 10 }}>
-          Claude APIキーを入力してください（<a href="https://console.anthropic.com/" target="_blank" rel="noopener noreferrer" style={{ color: "#6c5ce7" }}>取得はこちら</a>）
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <div style={{ position: "relative", flex: 1 }}>
-            <input
-              type={showApiKey ? "text" : "password"}
-              style={styles.textInput}
-              placeholder="sk-ant-..."
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              onFocus={(e) => (e.target.style.borderColor = "#6c5ce7")}
-              onBlur={(e) => (e.target.style.borderColor = "#e8e6f0")}
-            />
-          </div>
-          <button onClick={() => setShowApiKey(!showApiKey)} style={{ padding: "8px 12px", borderRadius: 10, border: "2px solid #e8e6f0", background: "#faf9ff", cursor: "pointer", fontSize: 14, whiteSpace: "nowrap" }}>
-            {showApiKey ? "🙈" : "👁️"}
-          </button>
-        </div>
-        {apiKey && (
-          <div style={{ marginTop: 6, fontSize: 12, color: "#00b894" }}>✓ APIキー設定済み</div>
-        )}
-      </div>
-
       {error && <div style={styles.error}>{error}</div>}
 
-      <button style={{ ...styles.primaryButton, opacity: apiKey ? 1 : 0.5 }} onClick={generatePlan} disabled={!apiKey}
+      <button style={styles.primaryButton} onClick={generatePlan}
         onMouseEnter={(e) => { e.target.style.transform = "translateY(-1px)"; e.target.style.boxShadow = "0 6px 20px rgba(108,92,231,0.4)"; }}
         onMouseLeave={(e) => { e.target.style.transform = "translateY(0)"; e.target.style.boxShadow = "0 4px 15px rgba(108,92,231,0.3)"; }}
       >
